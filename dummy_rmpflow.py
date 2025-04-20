@@ -11,7 +11,10 @@ from omni.isaac.motion_generation.lula import RmpFlow
 from omni.isaac.core.utils.types import ArticulationAction
 from omni.isaac.core.objects import cuboid
 from omni.isaac.core.objects import DynamicCuboid
-from omni.isaac.core.prims import RigidPrim
+from omni.isaac.core.prims import XFormPrim
+from omni.isaac.core.utils.prims import define_prim
+from pxr import Gf, UsdGeom, UsdPhysics
+
 import asyncio
 from omni.isaac.core.utils.stage import open_stage_async
 from omni.isaac.core.utils.rotations import euler_angles_to_quat
@@ -95,21 +98,39 @@ class JoyTargetCubeController(Node):
         self.subscription = self.create_subscription(Joy, '/joy', self.joy_callback, 10)
         self.k = k
 
+    # def joy_callback(self, msg: Joy):
+    #     global target_position, target_yaw
+    #     # 左搖桿控制位置
+    #     dx = msg.axes[0] * 0.01 * self.k
+    #     dy = msg.axes[1] * 0.01 * self.k * (-1)
+
+    #     # 右搖桿控制高度與角度
+    #     dz = msg.axes[4] * 0.01 * self.k
+    #     dyaw = msg.axes[3] * 0.05 * self.k  # 弧度
+
+    #     target_position += np.array([dx, dy, dz])
+    #     target_yaw += dyaw
+
+    #     self.get_logger().info(f"[JOY] Pos: {np.round(target_position, 2)}, Yaw: {np.degrees(target_yaw):.1f}°")
     def joy_callback(self, msg: Joy):
         global target_position, target_yaw
-        # 左搖桿控制位置
-        dx = msg.axes[0] * 0.01 * self.k
-        dy = msg.axes[1] * 0.01 * self.k
-
-        # 右搖桿控制高度與角度
+        # 1. 原始搖桿輸入（相對於 cube 自己的前/右）
+        local_dx = msg.axes[0] * 0.01 * self.k * (-1)   # 前進（Y搖桿）→ 轉成 X 方向分量
+        local_dy = msg.axes[1] * 0.01 * self.k   # 右移（X搖桿）→ 轉成 Y 方向分量
         dz = msg.axes[4] * 0.01 * self.k
-        dyaw = msg.axes[3] * 0.05 * self.k  # 弧度
+        dyaw = msg.axes[3] * 0.05 * self.k  # 弧度，右搖桿水平
 
+        # 2. 根據 yaw 旋轉局部向量 → 世界座標下的平移
+        cos_yaw = np.cos(target_yaw)
+        sin_yaw = np.sin(target_yaw)
+        dx = local_dx * cos_yaw - local_dy * sin_yaw
+        dy = local_dx * sin_yaw + local_dy * cos_yaw
+
+        # 3. 更新 cube 的位置與朝向
         target_position += np.array([dx, dy, dz])
         target_yaw += dyaw
 
         self.get_logger().info(f"[JOY] Pos: {np.round(target_position, 2)}, Yaw: {np.degrees(target_yaw):.1f}°")
-
 
 # 1. 載入場景 + 建立世界
 async def load():
@@ -147,15 +168,20 @@ target_cube = cuboid.VisualCuboid("/World/target",
                                   position=target_position, 
                                   size=0.05, 
                                   color=np.array([1.0, 0, 0]))
+define_prim("/World/target_arrow", "Xform")
+define_prim("/World/target_arrow/mesh", "Cube")
+arrow = XFormPrim(
+    prim_path="/World/target_arrow")
+arrow.set_local_scale(np.array([0.1, 0.01, 0.01]))  # 細長箭頭
 
-arrow = DynamicCuboid(
-    prim_path="/World/target_arrow",
-    position=np.array([0.05, 0.0, 0.4]),
-    scale=np.array([0.1, 0.01, 0.01]),  # 長方形箭頭
-    color=np.array([0.0, 1.0, 0.0]),
-    name="arrow",
-    mass=0.0  # 無物理質量，避免掉落
-)
+def update_arrow_pose(arrow, position, yaw):
+    yaw = yaw + np.pi / 2
+    quat = euler_angles_to_quat(np.array([0.0, 0.0, yaw]))  # 90° 繞 Z 軸
+    forward = np.array([np.cos(yaw), np.sin(yaw), 0.0]) * 0.06
+    arrow_pos = position + forward
+    # cube.set_world_pose(position=position, orientation=quat)
+    arrow.set_world_pose(position=arrow_pos, orientation=quat)
+
 # obstacle = cuboid.VisualCuboid("/World/obstacle", position=np.array([0.2, 0.2, 0.2]), size=0.05, color=np.array([0, 1.0, 0]))
 # rmpflow.add_obstacle(obstacle)
 
@@ -164,17 +190,28 @@ world.play()
 # 先获取Dummy Arm的初始位置
 initial = True
 
+# 設定旋轉（歐拉角 → 四元數），單位為 **弧度**
+quat = euler_angles_to_quat(np.array([0.0, 0.0, target_yaw]))  # 90° 繞 Z 軸
+
+# 設定世界姿態（位置 + 旋轉）
+target_cube.set_world_pose(
+    position = target_position,
+    orientation = quat
+)
+
+
 # 4. 每幀更新 → 目標追踪控制
 while simulation_app.is_running():
     world.step(render=True)
-    # 設定旋轉（歐拉角 → 四元數），單位為 **弧度**
-    quat = euler_angles_to_quat(np.array([0.0, 0.0, target_yaw]))  # 90° 繞 Z 軸
-
-    # 設定世界姿態（位置 + 旋轉）
-    target_cube.set_world_pose(
-        position = target_position,
-        orientation = quat
-    )
+    if target_position is not None:
+        # 設定旋轉（歐拉角 → 四元數），單位為 **弧度**
+        quat = euler_angles_to_quat(np.array([0.0, 0.0, target_yaw]))  # 90° 繞 Z 軸、
+        # 設定世界姿態（位置 + 旋轉）
+        target_cube.set_world_pose(
+            position = target_position,
+            orientation = quat
+        )
+    update_arrow_pose(arrow, target_position, target_yaw)
     if initial:
         # 同步到Isaac
         while current_joint_array is None:
