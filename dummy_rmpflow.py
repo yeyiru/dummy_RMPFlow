@@ -13,7 +13,8 @@ from omni.isaac.core.objects import cuboid
 from omni.isaac.core.objects import DynamicCuboid
 from omni.isaac.core.prims import XFormPrim
 from omni.isaac.core.utils.prims import define_prim
-from pxr import Gf, UsdGeom, UsdPhysics
+import omni.usd
+from pxr import Usd, Gf, UsdGeom, UsdPhysics, Sdf, UsdShade
 
 import asyncio
 from omni.isaac.core.utils.stage import open_stage_async
@@ -30,7 +31,10 @@ from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
 rclpy.init()
 current_joint_array = None
 target_position = np.array([0.0, -0.25, 0.4])
+target_pitch = 0.0
+target_roll = 0.0
 target_yaw = 3.14
+
 
 class TrajectoryPublisher(Node):
     def __init__(self, joint_names):
@@ -113,10 +117,10 @@ class JoyTargetCubeController(Node):
 
     #     self.get_logger().info(f"[JOY] Pos: {np.round(target_position, 2)}, Yaw: {np.degrees(target_yaw):.1f}°")
     def joy_callback(self, msg: Joy):
-        global target_position, target_yaw
+        global target_position, target_pitch, target_roll, target_yaw
         # 1. 原始搖桿輸入（相對於 cube 自己的前/右）
-        local_dx = msg.axes[0] * 0.01 * self.k * (-1)   # 前進（Y搖桿）→ 轉成 X 方向分量
-        local_dy = msg.axes[1] * 0.01 * self.k   # 右移（X搖桿）→ 轉成 Y 方向分量
+        local_dx = msg.axes[0] * 0.01 * self.k * (-1)
+        local_dy = msg.axes[1] * 0.01 * self.k
         dz = msg.axes[4] * 0.01 * self.k
         dyaw = msg.axes[3] * 0.05 * self.k  # 弧度，右搖桿水平
 
@@ -129,8 +133,102 @@ class JoyTargetCubeController(Node):
         # 3. 更新 cube 的位置與朝向
         target_position += np.array([dx, dy, dz])
         target_yaw += dyaw
+        
+        if msg.buttons[4]:  # LB
+            target_pitch += 0.05
+        if msg.axes[2] < 0.5:  # LT 扳機扣下時值從 1 → -1
+            target_pitch -= 0.05
 
-        self.get_logger().info(f"[JOY] Pos: {np.round(target_position, 2)}, Yaw: {np.degrees(target_yaw):.1f}°")
+        if msg.buttons[5]:  # RB
+            target_roll += 0.05
+        if msg.axes[5] < 0.5:  # RT
+            target_roll -= 0.05
+
+        self.get_logger().info(f"[JOY] Pos: {np.round(target_position, 2)}, \
+                                       Pitch: {np.degrees(target_pitch)}°,\
+                                       Roll: {np.degrees(target_roll)}°, \
+                                       Yaw: {np.degrees(target_yaw):.1f}°")
+
+def define_target_arrow(parents_prim_path: str, axis: str, color: tuple):
+    #定义箭头
+    define_prim(f"{parents_prim_path}/target_arrow_{axis}", "Xform")
+    define_prim(f"{parents_prim_path}/target_arrow_{axis}/body", "Cylinder")
+    define_prim(f"{parents_prim_path}/target_arrow_{axis}/tip", "Cone")
+
+    target_arrow = XFormPrim(
+        prim_path=f"{parents_prim_path}/target_arrow_{axis}"
+    )
+    target_arrow_body = XFormPrim(
+        prim_path=f"{parents_prim_path}/target_arrow_{axis}/body"
+    )
+    target_arrow_tip = XFormPrim(
+        prim_path=f"{parents_prim_path}/target_arrow_{axis}/tip"
+    )
+
+    target_arrow_body.set_local_scale(np.array([0.01, 0.01, 0.1]))  # 細長箭頭
+    target_arrow_tip.set_local_scale(np.array([0.03, 0.03, 0.03]))  # 箭頭大小
+
+    set_display_color(f"/World/target/target_arrow_{axis}/body", color)
+    set_display_color(f"/World/target/target_arrow_{axis}/tip", color)
+    return target_arrow, target_arrow_body, target_arrow_tip
+
+def set_display_color(prim_path: str, rgb: tuple):
+    stage = omni.usd.get_context().get_stage()
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim.IsValid():
+        print(f"[Warning] Invalid prim: {prim_path}")
+        return
+    geom = UsdGeom.Gprim(prim)
+    color = Gf.Vec3f(*rgb)
+    # display_color_attr = geom.CreateDisplayColorAttr()
+    geom.CreateDisplayColorAttr().Set([color])
+
+
+def update_arrow_pose(arrow_tip, arrow_body, position, pitch, roll, yaw, tip_offset=0.15):
+    roll = roll + np.pi / 2
+    yaw = yaw + np.pi / 2
+    quat = euler_angles_to_quat(np.array([pitch, roll, yaw]))  # 90° 繞 Z 軸
+    forward = np.array([np.cos(yaw), np.sin(yaw), 0.0]) * 0.06
+    arrow_pos = position + forward
+    # cube.set_world_pose(position=position, orientation=quat)
+    arrow_body.set_world_pose(position=arrow_pos, orientation=quat)
+    
+    # 計算箭頭在朝向 yaw 方向的 offset 位置
+    forward = np.array([np.cos(yaw), np.sin(yaw), 0.0])
+    tip_pos = position + tip_offset * forward
+    arrow_tip.set_world_pose(position=tip_pos, orientation=quat)
+
+def set_arrow_pose(arrow_tip, arrow_body, position, axis, tip_offset=0.15):
+    # roll = roll + np.pi / 2
+    # yaw = yaw + np.pi / 2
+    if axis == 'x':
+        yaw = -np.pi / 2
+        quat = euler_angles_to_quat(np.array([0.0, np.pi / 2, yaw]))  # 90° 繞 Z 軸
+        forward = np.array([np.cos(yaw), np.sin(yaw), 0.0])
+        
+    elif axis == 'y':
+        pitch = np.pi / 2
+        quat = euler_angles_to_quat(np.array([np.pi / 2, 0.0, pitch]))
+        forward = np.array([np.sin(pitch), 0.0, 0.0])
+
+    elif axis == 'z':
+        roll = np.pi
+        quat = euler_angles_to_quat(np.array([0.0, 0.0, roll]))
+        forward = np.array([0.0, 0.0, 1.0])
+
+    # arrow_pos = position + forward  * 0.06
+    # # cube.set_world_pose(position=position, orientation=quat)
+    # arrow_body.set_world_pose(position=arrow_pos, orientation=quat)
+    
+    # # 計算箭頭在朝向 yaw 方向的 offset 位置
+    # forward = np.array([np.cos(yaw), np.sin(yaw), 0.0])
+    # tip_pos = position + tip_offset * forward
+    # arrow_tip.set_world_pose(position=tip_pos, orientation=quat)
+    arrow_body_pos = position + 0.06 * forward
+    arrow_tip_pos = position + tip_offset * forward
+
+    arrow_body.set_world_pose(position=arrow_body_pos, orientation=quat)
+    arrow_tip.set_world_pose(position=arrow_tip_pos, orientation=quat)
 
 # 1. 載入場景 + 建立世界
 async def load():
@@ -164,23 +262,41 @@ rmpflow = RmpFlow(
 physics_dt = 1 / 60
 articulation_rmpflow = ArticulationMotionPolicy(dummy_arm, rmpflow, physics_dt)
 
-target_cube = cuboid.VisualCuboid("/World/target", 
-                                  position=target_position, 
+# 定義目標物體父类
+define_prim("/World/target", "Xform")
+target = XFormPrim(
+    prim_path="/World/target",
+    position=target_position,
+)
+
+# 定义目标方块
+target_cube = cuboid.VisualCuboid("/World/target/cube", 
+                                  # position=target_position, 
                                   size=0.05, 
                                   color=np.array([1.0, 0, 0]))
-define_prim("/World/target_arrow", "Xform")
-define_prim("/World/target_arrow/mesh", "Cube")
-arrow = XFormPrim(
-    prim_path="/World/target_arrow")
-arrow.set_local_scale(np.array([0.1, 0.01, 0.01]))  # 細長箭頭
+#定义箭头
+_, target_arrow_x_body, target_arrow_x_tip = define_target_arrow("/World/target", "x", (1.0, 0.0, 0.0))  # 红色x箭头
+_, target_arrow_y_body, target_arrow_y_tip = define_target_arrow("/World/target", "y", (0.0, 1.0, 0.0))  # 绿色y箭头
+_, target_arrow_z_body, target_arrow_z_tip = define_target_arrow("/World/target", "z", (0.0, 0.0, 1.0))  # 蓝色z箭头
+# define_prim("/World/target/target_arrow", "Xform")
+# define_prim("/World/target/target_arrow/body", "Cylinder")
+# define_prim("/World/target/target_arrow/tip", "Cone")
 
-def update_arrow_pose(arrow, position, yaw):
-    yaw = yaw + np.pi / 2
-    quat = euler_angles_to_quat(np.array([0.0, 0.0, yaw]))  # 90° 繞 Z 軸
-    forward = np.array([np.cos(yaw), np.sin(yaw), 0.0]) * 0.06
-    arrow_pos = position + forward
-    # cube.set_world_pose(position=position, orientation=quat)
-    arrow.set_world_pose(position=arrow_pos, orientation=quat)
+# target_arrow = XFormPrim(
+#     prim_path="/World/target/target_arrow"
+# )
+# target_arrow_body = XFormPrim(
+#     prim_path="/World/target/target_arrow/body"
+# )
+# target_arrow_tip = XFormPrim(
+#     prim_path="/World/target/target_arrow/tip"
+# )
+
+# target_arrow_body.set_local_scale(np.array([0.01, 0.01, 0.1]))  # 細長箭頭
+# target_arrow_tip.set_local_scale(np.array([0.03, 0.03, 0.03]))  # 箭頭大小
+
+# set_display_color("/World/target/target_arrow/body", (1.0, 0.0, 0.0))
+# set_display_color("/World/target/target_arrow/tip", (1.0, 0.0, 0.0))
 
 # obstacle = cuboid.VisualCuboid("/World/obstacle", position=np.array([0.2, 0.2, 0.2]), size=0.05, color=np.array([0, 1.0, 0]))
 # rmpflow.add_obstacle(obstacle)
@@ -191,13 +307,16 @@ world.play()
 initial = True
 
 # 設定旋轉（歐拉角 → 四元數），單位為 **弧度**
-quat = euler_angles_to_quat(np.array([0.0, 0.0, target_yaw]))  # 90° 繞 Z 軸
+quat = euler_angles_to_quat(np.array([target_pitch, target_roll, target_yaw]))  # 90° 繞 Z 軸
 
 # 設定世界姿態（位置 + 旋轉）
-target_cube.set_world_pose(
+target.set_world_pose(
     position = target_position,
     orientation = quat
 )
+set_arrow_pose(target_arrow_x_tip, target_arrow_x_body, target_position, 'x')
+set_arrow_pose(target_arrow_y_tip, target_arrow_y_body, target_position, 'y')
+set_arrow_pose(target_arrow_z_tip, target_arrow_z_body, target_position, 'z')
 
 
 # 4. 每幀更新 → 目標追踪控制
@@ -205,13 +324,13 @@ while simulation_app.is_running():
     world.step(render=True)
     if target_position is not None:
         # 設定旋轉（歐拉角 → 四元數），單位為 **弧度**
-        quat = euler_angles_to_quat(np.array([0.0, 0.0, target_yaw]))  # 90° 繞 Z 軸、
+        quat = euler_angles_to_quat(np.array([target_pitch, target_roll, target_yaw]))  # 90° 繞 Z 軸、
         # 設定世界姿態（位置 + 旋轉）
-        target_cube.set_world_pose(
+        target.set_world_pose(
             position = target_position,
             orientation = quat
         )
-    update_arrow_pose(arrow, target_position, target_yaw)
+    # update_arrow_pose(arrow_tip, arrow_body, target_position, target_pitch, target_roll, target_yaw)
     if initial:
         # 同步到Isaac
         while current_joint_array is None:
