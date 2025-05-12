@@ -25,6 +25,13 @@ from rclpy.node import Node
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from std_msgs.msg import Header
 from sensor_msgs.msg import JointState, Joy
+from geometry_msgs.msg import PoseStamped
+from tf2_ros import Buffer, TransformListener
+from tf2_ros import TransformException
+from scipy.spatial.transform import Rotation as R
+from tf2_geometry_msgs import do_transform_pose_stamped
+
+
 
 from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
 
@@ -34,7 +41,7 @@ target_position = np.array([0.0, -0.3, 0.26])
 target_pitch = 0.0
 target_roll = 0.0
 target_yaw = np.pi
-
+target_quat = [0.0, 0.0, 0.0, 1.0]
 
 class TrajectoryPublisher(Node):
     def __init__(self, joint_names):
@@ -102,20 +109,6 @@ class JoyTargetCubeController(Node):
         self.subscription = self.create_subscription(Joy, '/joy', self.joy_callback, 10)
         self.k = k
 
-    # def joy_callback(self, msg: Joy):
-    #     global target_position, target_yaw
-    #     # 左搖桿控制位置
-    #     dx = msg.axes[0] * 0.01 * self.k
-    #     dy = msg.axes[1] * 0.01 * self.k * (-1)
-
-    #     # 右搖桿控制高度與角度
-    #     dz = msg.axes[4] * 0.01 * self.k
-    #     dyaw = msg.axes[3] * 0.05 * self.k  # 弧度
-
-    #     target_position += np.array([dx, dy, dz])
-    #     target_yaw += dyaw
-
-    #     self.get_logger().info(f"[JOY] Pos: {np.round(target_position, 2)}, Yaw: {np.degrees(target_yaw):.1f}°")
     def joy_callback(self, msg: Joy):
         global target_position, target_pitch, target_roll, target_yaw
         # 1. 原始搖桿輸入（相對於 cube 自己的前/右）
@@ -148,6 +141,63 @@ class JoyTargetCubeController(Node):
                                        Pitch: {np.degrees(target_pitch)}°,\
                                        Roll: {np.degrees(target_roll)}°, \
                                        Yaw: {np.degrees(target_yaw):.1f}°")
+
+class ObjectPoseSubscriber(Node):
+    def __init__(self):
+        super().__init__('object_pose_subscriber')
+
+
+        # 创建 TF buffer 和 listener
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        
+        # 订阅 PoseStamped
+        self.subscription = self.create_subscription(
+            PoseStamped,
+            '/dummy/visual/pose',  # 你的话题名
+            self.pose_callback,
+            10
+        )
+
+        self.get_logger().info("Subscribed to /dummy/visual/pose")
+
+    def pose_callback(self, msg: PoseStamped):
+        global target_position, target_roll, target_pitch, target_yaw, target_quat
+        
+        try:
+            # isaac_frame ← camera_frame
+            transform = self.tf_buffer.lookup_transform(
+                'isaac_frame',
+                msg.header.frame_id,  # 通常是 camera_frame
+                rclpy.time.Time(seconds=0)
+            )
+
+            # 执行坐标转换
+            transformed = do_transform_pose_stamped(msg, transform)
+
+            # 提取位置
+            pos = transformed.pose.position
+            target_position = np.array([pos.x, pos.y, pos.z])
+
+            # 提取四元数 → 欧拉角
+            ori = transformed.pose.orientation
+            quat = [ori.x, ori.y, ori.z, ori.w]
+            target_quat = quat
+            r = R.from_quat(quat)
+            roll, pitch, yaw = r.as_euler('xyz', degrees=False)
+
+            target_roll = roll
+            target_pitch = pitch
+            target_yaw = yaw
+
+            self.get_logger().info(
+                f"[Transformed to base_link]\n"
+                f"x={pos.x:.3f}, y={pos.y:.3f}, z={pos.z:.3f}, "
+                f"rpy=({np.degrees(roll):.1f}°, {np.degrees(pitch):.1f}°, {np.degrees(yaw):.1f}°)"
+            )
+
+        except TransformException as e:
+            self.get_logger().warn(f"TF transform failed: {e}")
 
 def define_target_arrow(parents_prim_path: str, axis: str, color: tuple):
     #定义箭头
@@ -216,14 +266,6 @@ def set_arrow_pose(arrow_tip, arrow_body, position, axis, tip_offset=0.15):
         quat = euler_angles_to_quat(np.array([0.0, 0.0, roll]))
         forward = np.array([0.0, 0.0, 1.0])
 
-    # arrow_pos = position + forward  * 0.06
-    # # cube.set_world_pose(position=position, orientation=quat)
-    # arrow_body.set_world_pose(position=arrow_pos, orientation=quat)
-    
-    # # 計算箭頭在朝向 yaw 方向的 offset 位置
-    # forward = np.array([np.cos(yaw), np.sin(yaw), 0.0])
-    # tip_pos = position + tip_offset * forward
-    # arrow_tip.set_world_pose(position=tip_pos, orientation=quat)
     arrow_body_pos = position + 0.06 * forward
     arrow_tip_pos = position + tip_offset * forward
 
@@ -246,6 +288,7 @@ dummy_arm.initialize()
 ros_joint_cmd_pub = TrajectoryPublisher(dummy_arm.dof_names)
 ros_joint_state_sub = JointStateSubscriber()
 ros_joy_sub = JoyTargetCubeController()
+ros_object_sub = ObjectPoseSubscriber()
 # executor = MultiThreadedExecutor()
 # executor.add_node(ros_joint_cmd_pub)
 # executor.add_node(ros_joint_state_sub)
@@ -261,8 +304,6 @@ rmpflow = RmpFlow(
 
 physics_dt = 1 / 60
 articulation_rmpflow = ArticulationMotionPolicy(dummy_arm, rmpflow, physics_dt)
-last_ros_publish_time = time.time()
-ros_publish_interval = 0.1
 
 # 定義目標物體父类
 define_prim("/World/target", "Xform")
@@ -301,16 +342,23 @@ set_arrow_pose(target_arrow_z_tip, target_arrow_z_body, target_position, 'z')
 
 
 # 4. 每幀更新 → 目標追踪控制
-
 while simulation_app.is_running():
     world.step(render=True)
+    # 设置target_cube的姿态
     if target_position is not None:
         # 設定旋轉（歐拉角 → 四元數），單位為 **弧度**
         quat = euler_angles_to_quat(np.array([target_pitch, target_roll, target_yaw]))  # 90° 繞 Z 軸、
         # 設定世界姿態（位置 + 旋轉）
+        # 目标当前旋转
+        r1 = R.from_quat(target_quat)
+
+        # 绕Z轴旋转90度（单位是度）
+        r2 = R.from_euler('z', -90, degrees=True)
+        r_new = r2 * r1
+
         target.set_world_pose(
             position = target_position,
-            orientation = quat
+            orientation = r_new.as_quat() # target_quat
         )
     # update_arrow_pose(arrow_tip, arrow_body, target_position, target_pitch, target_roll, target_yaw)
     if initial:
@@ -338,6 +386,30 @@ while simulation_app.is_running():
                 break
         initial = False
     
+    cube_pos, cube_ori = target_cube.get_world_pose()
+    r = R.from_quat(cube_ori)
+    rot_matrix = r.as_matrix()  # 3x3 旋转矩阵
+    z_axis = rot_matrix[:, 2]
+    target_pos = np.array(cube_pos) + z_axis * 0.05
+    # 设定末端 Z 轴为 -cube 的 Z+
+    tool_z = -z_axis
+
+    # 选择任意一个不平行的向量作为 X 初始向量
+    arbitrary_x = np.array([1.0, 0.0, 0.0])
+    if np.allclose(np.abs(np.dot(tool_z, arbitrary_x)), 1.0):  # 避免平行
+        arbitrary_x = np.array([0.0, 1.0, 0.0])
+
+    # 用 Z 向量和任意向量构造正交坐标系
+    tool_x = np.cross(arbitrary_x, tool_z)
+    tool_x /= np.linalg.norm(tool_x)
+
+    tool_y = np.cross(tool_z, tool_x)
+    tool_y /= np.linalg.norm(tool_y)
+
+    # 构造旋转矩阵（列向量是 x, y, z）
+    target_rot_matrix = np.column_stack((tool_x, tool_y, tool_z))
+    target_ori = R.from_matrix(target_rot_matrix).as_quat()
+
     rmpflow.update_world()
     rmpflow.set_end_effector_target(
         target_cube.get_world_pose()[0],
@@ -347,12 +419,10 @@ while simulation_app.is_running():
     action = articulation_rmpflow.get_next_articulation_action()
     dummy_arm.apply_action(action)
     now = time.time()
-    # if now - last_ros_publish_time >= ros_publish_interval:
-    #     ros_joint_cmd_pub.publish_action(action.joint_positions)
-    #     last_ros_publish_time = now
-    # executor.spin_once(timeout_sec=0.01)
+    
     ros_joint_cmd_pub.publish_action(action.joint_positions)
     rclpy.spin_once(ros_joint_cmd_pub, timeout_sec=0.01)
-    rclpy.spin_once(ros_joy_sub, timeout_sec=0.01)
+    # rclpy.spin_once(ros_joy_sub, timeout_sec=0.01)
+    rclpy.spin_once(ros_object_sub, timeout_sec=0.01)
 # 5. 關閉 simulation
 simulation_app.close()

@@ -268,7 +268,7 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0.05"/> <!-- 相机的几何中心 -->
       <geometry>
-        <box size="0.08 0.04 0.04"/> <!-- 4x4x10 cm 的相机形状 -->
+        <box size="0.04 0.04 0.1"/> <!-- 4x4x10 cm 的相机形状 -->
       </geometry>
       <material name="silver"/>
     </visual>
