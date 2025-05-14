@@ -37,7 +37,7 @@ from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
 
 rclpy.init()
 current_joint_array = None
-target_position = np.array([0.0, -0.3, 0.26])
+target_position = np.array([-100.0, -100.0, -100.0])
 target_pitch = 0.0
 target_roll = 0.0
 target_yaw = np.pi
@@ -342,6 +342,8 @@ set_arrow_pose(target_arrow_z_tip, target_arrow_z_body, target_position, 'z')
 
 
 # 4. 每幀更新 → 目標追踪控制
+set_target_cube = False
+
 while simulation_app.is_running():
     world.step(render=True)
     # 设置target_cube的姿态
@@ -354,15 +356,28 @@ while simulation_app.is_running():
 
         # 绕Z轴旋转90度（单位是度）
         r2 = R.from_euler('z', -90, degrees=True)
-        r_new = r2 * r1
+        r3 = R.from_euler('x', -90, degrees=True)
+        r4 = R.from_euler('y', -90, degrees=True)
+        r_new = r4 * r3 * r2 * r1
+        
+        pitch = r_new.as_euler('xyz', degrees=True)[0]  # 提取 yaw
+        r_z = R.from_euler('x', pitch, degrees=True)
+
 
         target.set_world_pose(
-            position = target_position,
-            orientation = r_new.as_quat() # target_quat
+            position = target_position + np.array([0.05, 0.0, 0.0]),
+            orientation = r_z.as_quat() # target_quat
         )
     # update_arrow_pose(arrow_tip, arrow_body, target_position, target_pitch, target_roll, target_yaw)
     if initial:
         # 同步到Isaac
+        while not set_target_cube:
+            # 等待接收關節狀態
+            rclpy.spin_once(ros_object_sub, timeout_sec=0.01)
+            if (target_position != np.array([-100.0, -100.0, -100.0])).all():
+                set_target_cube = True
+                break
+        
         while current_joint_array is None:
             rclpy.spin_once(ros_joint_state_sub, timeout_sec=0.01)
 
@@ -423,6 +438,5 @@ while simulation_app.is_running():
     ros_joint_cmd_pub.publish_action(action.joint_positions)
     rclpy.spin_once(ros_joint_cmd_pub, timeout_sec=0.01)
     # rclpy.spin_once(ros_joy_sub, timeout_sec=0.01)
-    rclpy.spin_once(ros_object_sub, timeout_sec=0.01)
 # 5. 關閉 simulation
 simulation_app.close()
