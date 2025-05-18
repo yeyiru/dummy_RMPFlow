@@ -319,7 +319,7 @@
     <parent link="link5_1_1"/>
     <child link="link6_1_1"/>
     <axis xyz="-0.0 -1.0 0.0"/>
-    <limit effort="150" lower="-3.14" upper="3.14" velocity="3.15"/>
+    <limit effort="150" lower="-3.14" upper="3.14" velocity="1.00"/>
   </joint>
   <joint name="tool0_joint" type="fixed">
     <parent link="link6_1_1"/>
