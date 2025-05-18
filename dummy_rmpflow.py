@@ -27,6 +27,7 @@ from std_msgs.msg import Header
 from sensor_msgs.msg import JointState, Joy
 
 from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
+from scipy.spatial.transform import Rotation as R
 
 rclpy.init()
 current_joint_array = None
@@ -305,13 +306,36 @@ set_arrow_pose(target_arrow_z_tip, target_arrow_z_body, target_position, 'z')
 while simulation_app.is_running():
     world.step(render=True)
     if target_position is not None:
+        
         # 設定旋轉（歐拉角 → 四元數），單位為 **弧度**
-        quat = euler_angles_to_quat(np.array([target_pitch, target_roll, target_yaw]))  # 90° 繞 Z 軸、
+        target_quat = euler_angles_to_quat(np.array([target_pitch, target_roll, target_yaw]))  # 90° 繞 Z 軸、
         # 設定世界姿態（位置 + 旋轉）
+        # 目标当前旋转
+        r1 = R.from_quat(target_quat)
+
+        # 绕Z轴旋转90度（单位是度）
+        r2 = R.from_euler('z', -90, degrees=True)
+        r3 = R.from_euler('x', -90, degrees=True)
+        r4 = R.from_euler('y', -90, degrees=True)
+        r_new = r1 # r4 * r3 * r2 * r1
+        
+        pitch = r_new.as_euler('xyz', degrees=True)[0]  # 提取 yaw
+        r_z = R.from_euler('x', pitch, degrees=True)
+
+
         target.set_world_pose(
-            position = target_position,
-            orientation = quat
+            position = target_position + np.array([0.05, 0.0, 0.0]),
+            orientation = r_z.as_quat() # target_quat
         )
+
+        # # 設定旋轉（歐拉角 → 四元數），單位為 **弧度**
+        # quat = euler_angles_to_quat(np.array([target_pitch, target_roll, target_yaw]))  # 90° 繞 Z 軸、
+        # # 設定世界姿態（位置 + 旋轉）
+        # target.set_world_pose(
+        #     position = target_position,
+        #     orientation = quat
+        # )
+        
     # update_arrow_pose(arrow_tip, arrow_body, target_position, target_pitch, target_roll, target_yaw)
     if initial:
         # 同步到Isaac
