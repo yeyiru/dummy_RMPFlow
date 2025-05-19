@@ -31,11 +31,22 @@ from scipy.spatial.transform import Rotation as R
 
 rclpy.init()
 current_joint_array = None
-target_position = np.array([0.0, -0.3, 0.26])
+home_position = np.array([0.0, -0.222, 0.307])
+home_pitch = 0.0
+home_roll = 0.0
+home_yaw = np.pi
+
+target_position = home_position.copy()
 target_pitch = 0.0
 target_roll = 0.0
 target_yaw = np.pi
 
+def set_to_home():
+    global target_position, target_pitch, target_roll, target_yaw
+    target_position = home_position.copy()
+    target_pitch = home_pitch
+    target_roll = home_roll
+    target_yaw = home_yaw
 
 class TrajectoryPublisher(Node):
     def __init__(self, joint_names):
@@ -102,6 +113,7 @@ class JoyTargetCubeController(Node):
         super().__init__('joy_target_cube_controller')
         self.subscription = self.create_subscription(Joy, '/joy', self.joy_callback, 10)
         self.k = k
+        self.previous_state = 0  # 用于检测按钮上升沿
 
     # def joy_callback(self, msg: Joy):
     #     global target_position, target_yaw
@@ -144,6 +156,10 @@ class JoyTargetCubeController(Node):
             target_roll += 0.01
         if msg.axes[5] < 0.5:  # RT
             target_roll -= 0.01
+        
+        if msg.buttons[1]:
+            set_to_home()
+            self.get_logger().info("B button pressed! Backing home...")
 
         self.get_logger().info(f"[JOY] Pos: {np.round(target_position, 2)}, \
                                        Pitch: {np.degrees(target_pitch)}°,\
@@ -247,9 +263,6 @@ dummy_arm.initialize()
 ros_joint_cmd_pub = TrajectoryPublisher(dummy_arm.dof_names)
 ros_joint_state_sub = JointStateSubscriber()
 ros_joy_sub = JoyTargetCubeController()
-# executor = MultiThreadedExecutor()
-# executor.add_node(ros_joint_cmd_pub)
-# executor.add_node(ros_joint_state_sub)
 
 # 3. 初始化 RMPFlow 和目標物體
 rmpflow = RmpFlow(
