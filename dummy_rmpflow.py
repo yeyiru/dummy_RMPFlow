@@ -134,7 +134,7 @@ class JoyTargetCubeController(Node):
         # 1. 原始搖桿輸入（相對於 cube 自己的前/右）
         local_dx = msg.axes[0] * 0.01 * self.k * (-1)
         local_dy = msg.axes[1] * 0.01 * self.k
-        dz = msg.axes[4] * 0.01 * self.k
+        dz = msg.axes[7] * 0.01 * self.k
         dyaw = msg.axes[3] * 0.05 * self.k  # 弧度，右搖桿水平
 
         # 2. 根據 yaw 旋轉局部向量 → 世界座標下的平移
