@@ -1,5 +1,5 @@
 from omni.isaac.kit import SimulationApp
-simulation_app = SimulationApp({"headless": True})
+simulation_app = SimulationApp({"headless": False})
 
 import time
 import math
@@ -109,11 +109,10 @@ class JointStateSubscriber(Node):
         current_joint_array = joint_array
 
 class JoyTargetCubeController(Node):
-    def __init__(self, k=0.5):
+    def __init__(self, k=0.8):
         super().__init__('joy_target_cube_controller')
-        self.subscription = self.create_subscription(Joy, '/joy', self.joy_callback, 10)
+        self.subscription = self.create_subscription(Joy, '/joy_arm', self.joy_callback, 10)
         self.k = k
-        self.previous_state = 0  # 用于检测按钮上升沿
 
     # def joy_callback(self, msg: Joy):
     #     global target_position, target_yaw
@@ -327,13 +326,13 @@ while simulation_app.is_running():
         r1 = R.from_quat(target_quat)
 
         # 绕Z轴旋转90度（单位是度）
-        r2 = R.from_euler('z', -90, degrees=True)
-        r3 = R.from_euler('x', -90, degrees=True)
-        r4 = R.from_euler('y', -90, degrees=True)
-        r_new = r1 # r4 * r3 * r2 * r1
+        # r2 = R.from_euler('z', -90, degrees=True)
+        # r3 = R.from_euler('x', -90, degrees=True)
+        # r4 = R.from_euler('y', -90, degrees=True)
+        r_new = r1  # r4 * r3 * r2 * r1
         
-        pitch = r_new.as_euler('xyz', degrees=True)[0]  # 提取 yaw
-        r_z = R.from_euler('x', pitch, degrees=True)
+        pitch, roll, yaw = r_new.as_euler('xyz', degrees=True)  # 提取 yaw
+        r_z = R.from_euler('xyz', np.array([pitch, roll, yaw]), degrees=True)
 
 
         target.set_world_pose(
