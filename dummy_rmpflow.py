@@ -31,15 +31,17 @@ from scipy.spatial.transform import Rotation as R
 
 rclpy.init()
 current_joint_array = None
-home_position = np.array([0.0, -0.222, 0.307])
-home_pitch = 0.0
-home_roll = 0.0
+home_position = np.array([0.0, -0.30315, -0.2220])
+home_pitch = np.pi
+home_roll = np.deg2rad(77.0)
 home_yaw = np.pi
 
 target_position = home_position.copy()
 target_pitch = 0.0
 target_roll = 0.0
 target_yaw = np.pi
+
+reset_joints = np.array([0.0, 90.0, 90.0, 0.0, -77.0, 0.0])
 
 def set_to_home():
     global target_position, target_pitch, target_roll, target_yaw
@@ -114,20 +116,6 @@ class JoyTargetCubeController(Node):
         self.subscription = self.create_subscription(Joy, '/joy_arm', self.joy_callback, 10)
         self.k = k
 
-    # def joy_callback(self, msg: Joy):
-    #     global target_position, target_yaw
-    #     # 左搖桿控制位置
-    #     dx = msg.axes[0] * 0.01 * self.k
-    #     dy = msg.axes[1] * 0.01 * self.k * (-1)
-
-    #     # 右搖桿控制高度與角度
-    #     dz = msg.axes[4] * 0.01 * self.k
-    #     dyaw = msg.axes[3] * 0.05 * self.k  # 弧度
-
-    #     target_position += np.array([dx, dy, dz])
-    #     target_yaw += dyaw
-
-    #     self.get_logger().info(f"[JOY] Pos: {np.round(target_position, 2)}, Yaw: {np.degrees(target_yaw):.1f}°")
     def joy_callback(self, msg: Joy):
         global target_position, target_pitch, target_roll, target_yaw
         # 1. 原始搖桿輸入（相對於 cube 自己的前/右）
